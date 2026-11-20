@@ -20,7 +20,7 @@ jobs:
           image="$(docker image inspect ubuntu:20.04 --format '{{index .RepoDigests 0}}')"
           [[ "$image" == ubuntu@sha256:* ]]
           printf 'BASE_IMAGE=%s\n' "$image"
-          docker run --rm -i --platform linux/amd64 --cap-drop=ALL --security-opt=no-new-privileges "$image" bash -s <<'CONTAINER'
+          docker run --rm -i --platform linux/amd64 --security-opt=no-new-privileges "$image" bash -s <<'CONTAINER'
           set -euo pipefail
           export DEBIAN_FRONTEND=noninteractive LC_ALL=C TZ=UTC
           apt-get -o APT::Update::Error-Mode=any update
