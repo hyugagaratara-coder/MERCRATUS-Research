@@ -53,6 +53,20 @@ jobs:
           cc9be89a0984aeca9e3ca40ae0e6decff75aa32653a5925b04956a7c12487e99  /var/lib/apt/lists/archive.ubuntu.com_ubuntu_dists_focal_InRelease
           39e428ceaa25a9f3b0d6cfad43d07323c169f10e4e18703537e6035d830cfe00  /var/lib/apt/lists/security.ubuntu.com_ubuntu_dists_focal-security_InRelease
           RELEASES
+          # Collect public package metadata and installed-file checksums for diagnosis before the strict gate.
+          # A mismatch still terminates the job before fixture compilation.
+          cp /tmp/expected-release.sha256 /manifest-output/
+          mkdir /manifest-output/public-release-metadata
+          cp /var/lib/apt/lists/*InRelease /manifest-output/public-release-metadata/
+          sha256sum /var/lib/apt/lists/*InRelease | tee /manifest-output/actual-release.sha256
+          roots=(/usr/include /usr/lib/gcc /usr/lib/llvm-10 /usr/lib/x86_64-linux-gnu /usr/aarch64-linux-gnu /usr/bin /lib/x86_64-linux-gnu)
+          for root in "${roots[@]}"; do test -d "$root"; done
+          find "${roots[@]}" -type f -print0 | sort -z | xargs -0 sha256sum > /tmp/buildfiles.sha256
+          find "${roots[@]}" -type l -printf '%p -> %l\n' | sort > /tmp/buildlinks.txt
+          echo BUILD_FILE_COUNT=$(wc -l < /tmp/buildfiles.sha256)
+          echo BUILD_SYMLINK_COUNT=$(wc -l < /tmp/buildlinks.txt)
+          sha256sum /tmp/buildfiles.sha256 /tmp/buildlinks.txt
+          cp /tmp/buildfiles.sha256 /tmp/buildlinks.txt /tmp/installed-packages.tsv /manifest-output/
           sha256sum -c /tmp/expected-release.sha256
           echo SIGNED_RELEASE_HASHES_PASS
           cat > /tmp/expected-tools.sha256 <<'TOOLS'
@@ -64,14 +78,6 @@ jobs:
           TOOLS
           sha256sum -c /tmp/expected-tools.sha256
           echo COMPILER_LINKER_HASHES_PASS
-          roots=(/usr/include /usr/lib/gcc /usr/lib/llvm-10 /usr/lib/x86_64-linux-gnu /usr/aarch64-linux-gnu /usr/bin /lib/x86_64-linux-gnu)
-          for root in "${roots[@]}"; do test -d "$root"; done
-          find "${roots[@]}" -type f -print0 | sort -z | xargs -0 sha256sum > /tmp/buildfiles.sha256
-          find "${roots[@]}" -type l -printf '%p -> %l\n' | sort > /tmp/buildlinks.txt
-          echo BUILD_FILE_COUNT=$(wc -l < /tmp/buildfiles.sha256)
-          echo BUILD_SYMLINK_COUNT=$(wc -l < /tmp/buildlinks.txt)
-          sha256sum /tmp/buildfiles.sha256 /tmp/buildlinks.txt
-          cp /tmp/buildfiles.sha256 /tmp/buildlinks.txt /tmp/installed-packages.tsv /manifest-output/
           test "$(wc -l < /tmp/buildfiles.sha256)" = 6962
           test "$(wc -l < /tmp/buildlinks.txt)" = 437
           printf '%s\n' '44387025e13290c28ca6126f277c10027ea442b3468886e51f2cbcd542616ef2  /tmp/buildfiles.sha256' 'be1d916c28cff9e10d870080257943475bfad1518b18ad79769667c2b3ce2e34  /tmp/buildlinks.txt' | sha256sum -c
