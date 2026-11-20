@@ -1,0 +1,148 @@
+name: Synthetic compiler manifest replay
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - '.github/workflows/synthetic-manifest-replay.yml'
+permissions:
+  contents: read
+jobs:
+  compiler-smoke:
+    if: github.event.repository.private == false
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Resolve isolated Focal image and compile synthetic objects
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker pull --platform linux/amd64 ubuntu@sha256:8feb4d8ca5354def3d8fce243717141ce31e2c428701f6682bd2fafe15388214
+          image="$(docker image inspect ubuntu@sha256:8feb4d8ca5354def3d8fce243717141ce31e2c428701f6682bd2fafe15388214 --format '{{index .RepoDigests 0}}')"
+          test "$image" = ubuntu@sha256:8feb4d8ca5354def3d8fce243717141ce31e2c428701f6682bd2fafe15388214
+          printf 'BASE_IMAGE=%s\n' "$image"
+          mkdir -p "$RUNNER_TEMP/synthetic-manifests"
+          docker run --rm -i --platform linux/amd64 --security-opt=no-new-privileges --mount "type=bind,source=$RUNNER_TEMP/synthetic-manifests,target=/manifest-output" "$image" bash -s <<'CONTAINER'
+          set -euo pipefail
+          export DEBIAN_FRONTEND=noninteractive LC_ALL=C TZ=UTC
+          apt-get -o APT::Update::Error-Mode=any update
+          apt-get install -y --no-install-recommends ca-certificates=20240203~20.04.1 curl=7.68.0-1ubuntu2.25 gnupg=2.2.19-3ubuntu2.5
+          curl --fail --silent --show-error --location --proto '=https' https://apt.llvm.org/llvm-snapshot.gpg.key -o /tmp/llvm.asc
+          fingerprint="$(gpg --batch --show-keys --with-colons /tmp/llvm.asc | awk -F: '$1=="fpr" {print $10; exit}')"
+          test "$fingerprint" = 6084F3CF814B57C1CF12EFD515CF4D18AF4F7421
+          gpg --batch --dearmor --output /usr/share/keyrings/llvm-archive.gpg /tmp/llvm.asc
+          printf '%s\n' 'deb [signed-by=/usr/share/keyrings/llvm-archive.gpg] https://apt.llvm.org/focal/ llvm-toolchain-focal-10 main' > /etc/apt/sources.list.d/llvm10.list
+          apt-get -o APT::Update::Error-Mode=any update
+          apt-cache policy gcc-9 gcc-9-aarch64-linux-gnu clang-10
+          apt-get install -y --no-install-recommends gcc-9=9.4.0-1ubuntu1~20.04.2 gcc-9-aarch64-linux-gnu=9.4.0-1ubuntu1~20.04.2cross2 libc6-dev=2.31-0ubuntu9.18 libc6-dev-arm64-cross=2.31-0ubuntu9.9cross1 binutils=2.34-6ubuntu1.11 binutils-aarch64-linux-gnu=2.34-6ubuntu1.11 clang-10=1:10.0.1~++20211003085942+ef32c611aa21-1~exp1~20211003090334.2
+          gcc_version="$(gcc-9 -dumpfullversion)"
+          cross_version="$(aarch64-linux-gnu-gcc-9 -dumpfullversion)"
+          clang_version="$(clang-10 --version)"
+          printf 'GCC_NATIVE=%s\nGCC_CROSS=%s\nCLANG=%s\n' "$gcc_version" "$cross_version" "$clang_version"
+          test "$gcc_version" = 9.4.0 || { echo 'GCC_NATIVE_VERSION_FAIL'; exit 21; }
+          test "$cross_version" = 9.4.0 || { echo 'GCC_CROSS_VERSION_FAIL'; exit 22; }
+          grep -Eq 'clang version 10\.0\.1([[:space:]~+()-]|$)' <<< "$clang_version" || { echo 'CLANG_VERSION_FAIL'; exit 23; }
+          echo 'EXACT_COMPILER_VERSION_GATE_PASS'
+          dpkg-query -W -f='${Package}\t${Version}\t${Architecture}\n' | sort > /tmp/installed-packages.tsv
+          echo "d94328282fa9b6422e5965f712fdd58a7135286abc38dadd46641b2f74ed804a  /tmp/installed-packages.tsv" | sha256sum -c
+          cat /tmp/installed-packages.tsv
+          echo PACKAGE_ROSTER_196_PASS
+          cat > /tmp/expected-release.sha256 <<'RELEASES'
+          4eff42bd9a7461b63aefcdf8391a5e14e77a6341d3752812122c4109dcbc5bbb  /var/lib/apt/lists/apt.llvm.org_focal_dists_llvm-toolchain-focal-10_InRelease
+          cc9cc023c3371e3691c6e7365ba08b8f49f4c7c0079e4e1f418bdb5278afcc77  /var/lib/apt/lists/archive.ubuntu.com_ubuntu_dists_focal-backports_InRelease
+          c84a4df9e349eaff66ca005db88f45a6126dfcc70c8065cbd40236151ef80fd1  /var/lib/apt/lists/archive.ubuntu.com_ubuntu_dists_focal-updates_InRelease
+          cc9be89a0984aeca9e3ca40ae0e6decff75aa32653a5925b04956a7c12487e99  /var/lib/apt/lists/archive.ubuntu.com_ubuntu_dists_focal_InRelease
+          39e428ceaa25a9f3b0d6cfad43d07323c169f10e4e18703537e6035d830cfe00  /var/lib/apt/lists/security.ubuntu.com_ubuntu_dists_focal-security_InRelease
+          RELEASES
+          sha256sum -c /tmp/expected-release.sha256
+          echo SIGNED_RELEASE_HASHES_PASS
+          cat > /tmp/expected-tools.sha256 <<'TOOLS'
+          6cb2d84ccd9fd3485d4e47ba032e626be65692601c38fad46866a6b565f3100f  /usr/bin/x86_64-linux-gnu-gcc-9
+          f3ccb11f596dad71d0554e6f9132b8ad30b295e5c42f67bd91049246d794accb  /usr/bin/aarch64-linux-gnu-gcc-9
+          b4e85113e8a79c9c1bdfd78682478fdc2a619c5b7e7ea6861bc707d48da4c12f  /usr/lib/llvm-10/bin/clang
+          476b24d5cc1fef54f80412d06e7430b2dcf4e2b6f1525ee17e6eaaf16b28a00f  /usr/bin/x86_64-linux-gnu-ld.bfd
+          d85f67579ff4ebd96d0b7ae6d8a46bd209ee6ebf5d7c7c3e36602aca7852062b  /usr/bin/aarch64-linux-gnu-ld.bfd
+          TOOLS
+          sha256sum -c /tmp/expected-tools.sha256
+          echo COMPILER_LINKER_HASHES_PASS
+          roots=(/usr/include /usr/lib/gcc /usr/lib/llvm-10 /usr/lib/x86_64-linux-gnu /usr/aarch64-linux-gnu /usr/bin /lib/x86_64-linux-gnu)
+          for root in "${roots[@]}"; do test -d "$root"; done
+          find "${roots[@]}" -type f -print0 | sort -z | xargs -0 sha256sum > /tmp/buildfiles.sha256
+          find "${roots[@]}" -type l -printf '%p -> %l\n' | sort > /tmp/buildlinks.txt
+          echo BUILD_FILE_COUNT=$(wc -l < /tmp/buildfiles.sha256)
+          echo BUILD_SYMLINK_COUNT=$(wc -l < /tmp/buildlinks.txt)
+          sha256sum /tmp/buildfiles.sha256 /tmp/buildlinks.txt
+          cp /tmp/buildfiles.sha256 /tmp/buildlinks.txt /tmp/installed-packages.tsv /manifest-output/
+          test "$(wc -l < /tmp/buildfiles.sha256)" = 6962
+          test "$(wc -l < /tmp/buildlinks.txt)" = 437
+          printf '%s\n' '44387025e13290c28ca6126f277c10027ea442b3468886e51f2cbcd542616ef2  /tmp/buildfiles.sha256' 'be1d916c28cff9e10d870080257943475bfad1518b18ad79769667c2b3ce2e34  /tmp/buildlinks.txt' | sha256sum -c
+          echo LOCKED_MANIFEST_REPLAY_PASS
+          sha256sum /var/lib/apt/lists/*InRelease
+          for compiler in gcc-9 aarch64-linux-gnu-gcc-9 clang-10 ld aarch64-linux-gnu-ld; do
+            sha256sum "$(readlink -f "$(command -v "$compiler")")"
+            "$compiler" --version | head -n 1
+          done
+          mkdir /tmp/synthetic
+          cd /tmp/synthetic
+          cat > fixture.c <<'C'
+          #include <stdint.h>
+          __attribute__((noinline))
+          uint32_t fixture(uint32_t x, uint32_t y) {
+              uint32_t s = 0u;
+              for (uint32_t i = 0; i < 12; ++i) {
+                  s += (x ^ (y+i)) & 255u;
+                  x = (x << 3) | (x >> 29);
+              }
+              return s;
+          }
+          int main(void) { return fixture(1u, 2u) == 0u; }
+          C
+          sha256sum fixture.c
+          test -f /usr/include/x86_64-linux-gnu/bits/libc-header-start.h
+          test -f /usr/aarch64-linux-gnu/include/bits/libc-header-start.h
+          echo 'BUILD_GCC_X86'
+          gcc-9 -O2 -g -fno-lto fixture.c -o gcc-x86.elf
+          echo 'BUILD_GCC_X86_PASS'
+          echo 'BUILD_GCC_ARM'
+          aarch64-linux-gnu-gcc-9 -O2 -g -fno-lto fixture.c -o gcc-arm.elf
+          echo 'BUILD_GCC_ARM_PASS'
+          echo 'BUILD_CLANG_X86'
+          clang-10 --target=x86_64-linux-gnu --gcc-toolchain=/usr -isystem /usr/include/x86_64-linux-gnu -v -O2 -g -fno-lto fixture.c -o clang-x86.elf
+          echo 'BUILD_CLANG_X86_PASS'
+          echo 'BUILD_CLANG_ARM'
+          clang-10 --target=aarch64-linux-gnu --gcc-toolchain=/usr -B/usr/aarch64-linux-gnu/bin -isystem /usr/aarch64-linux-gnu/include -L/usr/aarch64-linux-gnu/lib -v -O2 -g -fno-lto fixture.c -o clang-arm.elf
+          echo 'BUILD_CLANG_ARM_PASS'
+          for f in gcc-x86.elf gcc-arm.elf clang-x86.elf clang-arm.elf; do
+            echo "SYNTHETIC_ELF=$f"
+            readelf -h "$f"
+            case "$f" in
+              *-arm.elf) readelf -h "$f" | grep -E 'Machine:.*AArch64' ;;
+              *-x86.elf) readelf -h "$f" | grep -E 'Machine:.*X86-64' ;;
+            esac
+            readelf -Ws "$f" > "$f.symbols"
+            grep -E 'FUNC.*[[:space:]]fixture$' "$f.symbols"
+            readelf --debug-dump=info "$f" > "$f.dwarf"
+            grep 'DW_AT_producer' "$f.dwarf"
+            readelf -p .comment "$f"
+            readelf -l "$f"
+            readelf -V "$f"
+            sha256sum "$f"
+          done
+          echo 'SYNTHETIC_FOUR_VIEW_PASS (not historical toolchain identity; no source TEST admission)'
+          cat > /tmp/expected-fixtures.sha256 <<'FIXTURES'
+          c19ac5a428be96bdac04ddb5ddb308d019ed2bc36cd2ac3d29622a1b0a5bd84f  gcc-x86.elf
+          02f1553ff80426657d263805a47c135d9ded05fc0331a69b759b1605aeb00058  gcc-arm.elf
+          83a7c602b356802051062f0fd16b4ce8ff7d53bdb9031200dcf5311b7a4828bd  clang-x86.elf
+          461fd17db67a939abb20f51fd60e49104ab4dc778165cebe904e01724917dfd8  clang-arm.elf
+          FIXTURES
+          sha256sum -c /tmp/expected-fixtures.sha256
+          echo SYNTHETIC_RUN4_BYTE_HASH_REPLAY_PASS
+          echo BUILD_ENVIRONMENT_REPLAY_PASS
+          CONTAINER
+      - name: Retain public synthetic environment manifests
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: synthetic-environment-manifests
+          path: ${{ runner.temp }}/synthetic-manifests/
+          if-no-files-found: error
+          retention-days: 30
