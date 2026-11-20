@@ -1,0 +1,82 @@
+name: Synthetic compiler compatibility smoke
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - '.github/workflows/compiler-smoke.yml'
+permissions:
+  contents: read
+jobs:
+  compiler-smoke:
+    if: github.event.repository.private == false
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Resolve isolated Focal image and compile synthetic objects
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker pull --platform linux/amd64 ubuntu:20.04
+          image="$(docker image inspect ubuntu:20.04 --format '{{index .RepoDigests 0}}')"
+          [[ "$image" == ubuntu@sha256:* ]]
+          printf 'BASE_IMAGE=%s\n' "$image"
+          docker run --rm -i --platform linux/amd64 --cap-drop=ALL --security-opt=no-new-privileges "$image" bash -s <<'CONTAINER'
+          set -euo pipefail
+          export DEBIAN_FRONTEND=noninteractive LC_ALL=C TZ=UTC
+          apt-get -o APT::Update::Error-Mode=any update
+          apt-get install -y --no-install-recommends ca-certificates curl gnupg
+          curl --fail --silent --show-error --location --proto '=https' https://apt.llvm.org/llvm-snapshot.gpg.key -o /tmp/llvm.asc
+          fingerprint="$(gpg --batch --show-keys --with-colons /tmp/llvm.asc | awk -F: '$1=="fpr" {print $10; exit}')"
+          test "$fingerprint" = 6084F3CF814B57C1CF12EFD515CF4D18AF4F7421
+          gpg --batch --dearmor --output /usr/share/keyrings/llvm-archive.gpg /tmp/llvm.asc
+          printf '%s\n' 'deb [signed-by=/usr/share/keyrings/llvm-archive.gpg] https://apt.llvm.org/focal/ llvm-toolchain-focal-10 main' > /etc/apt/sources.list.d/llvm10.list
+          apt-get -o APT::Update::Error-Mode=any update
+          apt-cache policy gcc-9 gcc-9-aarch64-linux-gnu clang-10
+          apt-get install -y --no-install-recommends gcc-9 gcc-9-aarch64-linux-gnu libc6-dev libc6-dev-arm64-cross binutils binutils-aarch64-linux-gnu clang-10
+          test "$(gcc-9 -dumpfullversion)" = 9.4.0
+          test "$(aarch64-linux-gnu-gcc-9 -dumpfullversion)" = 9.4.0
+          clang-10 --version | grep -E 'clang version 10\.0\.1([[:space:]]|$)'
+          dpkg-query -W -f='${Package}\t${Version}\t${Architecture}\n' | sort
+          sha256sum /var/lib/apt/lists/*InRelease
+          for compiler in gcc-9 aarch64-linux-gnu-gcc-9 clang-10 ld aarch64-linux-gnu-ld; do
+            sha256sum "$(readlink -f "$(command -v "$compiler")")"
+            "$compiler" --version | head -n 1
+          done
+          mkdir /tmp/synthetic
+          cd /tmp/synthetic
+          cat > fixture.c <<'C'
+          #include <stdint.h>
+          __attribute__((noinline))
+          uint32_t fixture(uint32_t x, uint32_t y) {
+              uint32_t s = 0u;
+              for (uint32_t i = 0; i < 12; ++i) {
+                  s += (x ^ (y+i)) & 255u;
+                  x = (x << 3) | (x >> 29);
+              }
+              return s;
+          }
+          int main(void) { return fixture(1u, 2u) == 0u; }
+          C
+          sha256sum fixture.c
+          gcc-9 -O2 -g -fno-lto fixture.c -o gcc-x86.elf
+          aarch64-linux-gnu-gcc-9 -O2 -g -fno-lto fixture.c -o gcc-arm.elf
+          clang-10 --target=x86_64-linux-gnu --gcc-toolchain=/usr -O2 -g -fno-lto fixture.c -o clang-x86.elf
+          clang-10 --target=aarch64-linux-gnu --gcc-toolchain=/usr -O2 -g -fno-lto fixture.c -o clang-arm.elf
+          for f in gcc-x86.elf gcc-arm.elf clang-x86.elf clang-arm.elf; do
+            echo "SYNTHETIC_ELF=$f"
+            readelf -h "$f"
+            case "$f" in
+              *-arm.elf) readelf -h "$f" | grep -E 'Machine:.*AArch64' ;;
+              *-x86.elf) readelf -h "$f" | grep -E 'Machine:.*X86-64' ;;
+            esac
+            readelf -Ws "$f" > "$f.symbols"
+            grep -E 'FUNC.*[[:space:]]fixture$' "$f.symbols"
+            readelf --debug-dump=info "$f" > "$f.dwarf"
+            grep 'DW_AT_producer' "$f.dwarf"
+            readelf -p .comment "$f"
+            readelf -l "$f"
+            readelf -V "$f"
+            sha256sum "$f"
+          done
+          echo 'SYNTHETIC_FOUR_VIEW_PASS (not historical toolchain identity; no source TEST admission)'
+          CONTAINER
