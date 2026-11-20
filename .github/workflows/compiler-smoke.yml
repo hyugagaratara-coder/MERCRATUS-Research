@@ -63,10 +63,20 @@ jobs:
           int main(void) { return fixture(1u, 2u) == 0u; }
           C
           sha256sum fixture.c
+          test -f /usr/include/x86_64-linux-gnu/bits/libc-header-start.h
+          test -f /usr/aarch64-linux-gnu/include/bits/libc-header-start.h
+          echo 'BUILD_GCC_X86'
           gcc-9 -O2 -g -fno-lto fixture.c -o gcc-x86.elf
+          echo 'BUILD_GCC_X86_PASS'
+          echo 'BUILD_GCC_ARM'
           aarch64-linux-gnu-gcc-9 -O2 -g -fno-lto fixture.c -o gcc-arm.elf
-          clang-10 --target=x86_64-linux-gnu --gcc-toolchain=/usr -O2 -g -fno-lto fixture.c -o clang-x86.elf
-          clang-10 --target=aarch64-linux-gnu --gcc-toolchain=/usr -O2 -g -fno-lto fixture.c -o clang-arm.elf
+          echo 'BUILD_GCC_ARM_PASS'
+          echo 'BUILD_CLANG_X86'
+          clang-10 --target=x86_64-linux-gnu --gcc-toolchain=/usr -isystem /usr/include/x86_64-linux-gnu -v -O2 -g -fno-lto fixture.c -o clang-x86.elf
+          echo 'BUILD_CLANG_X86_PASS'
+          echo 'BUILD_CLANG_ARM'
+          clang-10 --target=aarch64-linux-gnu --gcc-toolchain=/usr -B/usr/aarch64-linux-gnu/bin -isystem /usr/aarch64-linux-gnu/include -L/usr/aarch64-linux-gnu/lib -v -O2 -g -fno-lto fixture.c -o clang-arm.elf
+          echo 'BUILD_CLANG_ARM_PASS'
           for f in gcc-x86.elf gcc-arm.elf clang-x86.elf clang-arm.elf; do
             echo "SYNTHETIC_ELF=$f"
             readelf -h "$f"
